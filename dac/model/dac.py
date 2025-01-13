@@ -173,6 +173,7 @@ class DAC(BaseModel, CodecMixin):
 
         self.hop_length = np.prod(encoder_rates)
         self.encoder = Encoder(encoder_dim, encoder_rates, latent_dim)
+        self.noisy_encoder = Encoder(encoder_dim, encoder_rates, latent_dim)
 
         self.n_codebooks = n_codebooks
         self.codebook_size = codebook_size
@@ -210,6 +211,7 @@ class DAC(BaseModel, CodecMixin):
         self,
         audio_data: torch.Tensor,
         n_quantizers: int = None,
+        noisy: bool = True,
     ):
         """Encode given audio data and return quantized latent codes
 
@@ -240,11 +242,14 @@ class DAC(BaseModel, CodecMixin):
             "length" : int
                 Number of samples in input audio
         """
-        z = self.encoder(audio_data)
-        z, codes, latents, commitment_loss, codebook_loss = self.quantizer(
+        if noisy:
+            z = self.noisy_encoder(audio_data)
+        else:
+            z = self.encoder(audio_data)
+        z, codes, latents, commitment_loss, codebook_loss, residuals = self.quantizer(
             z, n_quantizers
         )
-        return z, codes, latents, commitment_loss, codebook_loss
+        return z, codes, latents, commitment_loss, codebook_loss, residuals
 
     def decode(self, z: torch.Tensor):
         """Decode given latent codes and return audio data
@@ -270,6 +275,7 @@ class DAC(BaseModel, CodecMixin):
         audio_data: torch.Tensor,
         sample_rate: int = None,
         n_quantizers: int = None,
+        noisy: bool = True,
     ):
         """Model forward pass
 
@@ -307,10 +313,9 @@ class DAC(BaseModel, CodecMixin):
         """
         length = audio_data.shape[-1]
         audio_data = self.preprocess(audio_data, sample_rate)
-        z, codes, latents, commitment_loss, codebook_loss = self.encode(
-            audio_data, n_quantizers
+        z, codes, latents, commitment_loss, codebook_loss, residuals = self.encode(
+            audio_data, n_quantizers, noisy
         )
-
         x = self.decode(z)
         return {
             "audio": x[..., :length],
@@ -319,6 +324,7 @@ class DAC(BaseModel, CodecMixin):
             "latents": latents,
             "vq/commitment_loss": commitment_loss,
             "vq/codebook_loss": codebook_loss,
+            "residuals": residuals,
         }
 
 

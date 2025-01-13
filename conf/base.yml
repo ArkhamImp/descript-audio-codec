@@ -31,7 +31,7 @@ ExponentialLR.gamma: 0.999996
 amp: false
 val_batch_size: 100
 device: cuda
-num_iters: 250000
+num_iters: 2500000
 save_iters: [10000, 50000, 100000, 200000]
 valid_freq: 1000
 sample_freq: 10000
@@ -44,6 +44,8 @@ lambdas:
   adv/gen_loss: 1.0
   vq/commitment_loss: 0.25
   vq/codebook_loss: 1.0
+  z_loss: 1.0
+  codes_loss: 0.01
 
 VolumeNorm.db: [const, -16]
 

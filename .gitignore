@@ -50,6 +50,7 @@ coverage.xml
 *.py,cover
 .hypothesis/
 .pytest_cache/
+.vscode/
 
 # Translations
 *.mo
@@ -174,3 +175,4 @@ archived/
 encoded_out/
 recon/
 recons/
+checkpoints/

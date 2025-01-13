@@ -73,7 +73,9 @@ def build_transform(
 ):
     to_tfm = lambda l: [getattr(tfm, x)() for x in l]
     preprocess = transforms.Compose(*to_tfm(preprocess), name="preprocess")
-    augment = transforms.Compose(*to_tfm(augment), name="augment", prob=augment_prob)
+    lowpass = transforms.LowPass(cutoff=("uniform", 1500, 22050), prob=1.0)
+    noise = transforms.BackgroundNoise(snr=("uniform", -5.0, 40.0), sources=["noise.csv"], prob=1.0)
+    augment = transforms.Compose(*to_tfm(augment) + [lowpass, noise], name="augment", prob=augment_prob)
     postprocess = transforms.Compose(*to_tfm(postprocess), name="postprocess")
     transform = transforms.Compose(preprocess, augment, postprocess)
     return transform
@@ -127,7 +129,7 @@ def load(
     accel: ml.Accelerator,
     tracker: Tracker,
     save_path: str,
-    resume: bool = False,
+    resume: bool = True,
     tag: str = "latest",
     load_weights: bool = False,
 ):
@@ -146,7 +148,17 @@ def load(
         if (Path(kwargs["folder"]) / "discriminator").exists():
             discriminator, d_extra = Discriminator.load_from_folder(**kwargs)
 
-    generator = DAC() if generator is None else generator
+    # generator = DAC() if generator is None else generator
+    generator = dac.DAC.load('pretrained') if generator is None else generator
+    generator.noisy_encoder.load_state_dict(generator.encoder.state_dict())
+    
+    # 冻结其他组件的参数
+    for p in generator.quantizer.quantizers.parameters():
+        p.requires_grad = False
+    for p in generator.decoder.parameters():
+        p.requires_grad = False
+    for p in generator.encoder.parameters():
+        p.requires_grad = False
     discriminator = Discriminator() if discriminator is None else discriminator
 
     tracker.print(generator)
@@ -211,14 +223,14 @@ def val_loop(batch, state, accel):
         batch["signal"].clone(), **batch["transform_args"]
     )
 
-    out = state.generator(signal.audio_data, signal.sample_rate)
+    out = state.generator(batch["signal"].audio_data, signal.sample_rate)
     recons = AudioSignal(out["audio"], signal.sample_rate)
 
     return {
-        "loss": state.mel_loss(recons, signal),
-        "mel/loss": state.mel_loss(recons, signal),
-        "stft/loss": state.stft_loss(recons, signal),
-        "waveform/loss": state.waveform_loss(recons, signal),
+        "loss": state.mel_loss(recons, batch["signal"]),
+        "mel/loss": state.mel_loss(recons, batch["signal"]),
+        "stft/loss": state.stft_loss(recons, batch["signal"]),
+        "waveform/loss": state.waveform_loss(recons, batch["signal"]),
     }
 
 
@@ -230,6 +242,7 @@ def train_loop(state, batch, accel, lambdas):
 
     batch = util.prepare_batch(batch, accel.device)
     with torch.no_grad():
+        original_signal = batch["signal"]
         signal = state.train_data.transform(
             batch["signal"].clone(), **batch["transform_args"]
         )
@@ -239,29 +252,47 @@ def train_loop(state, batch, accel, lambdas):
         recons = AudioSignal(out["audio"], signal.sample_rate)
         commitment_loss = out["vq/commitment_loss"]
         codebook_loss = out["vq/codebook_loss"]
+        original_out = state.generator(original_signal.audio_data, original_signal.sample_rate, noisy=False)
+        z_loss = 0.0
+        for i in range(len(out['residuals'])):
+            z_loss += torch.nn.MSELoss()(out['residuals'][i], original_out['residuals'][i])
+        original_recons = AudioSignal(original_out["audio"], original_signal.sample_rate)
+        original_commitment_loss = original_out["vq/commitment_loss"]
+        original_codebook_loss = original_out["vq/codebook_loss"]
+
+    # with accel.autocast():
+    #     output["adv/disc_loss"] = state.gan_loss.discriminator_loss(recons, batch["signal"])
+    #     # output["adv/disc_loss_original"] = state.gan_loss.discriminator_loss(original_recons, original_signal)
+
+    # state.optimizer_d.zero_grad()
+    # accel.backward(output["adv/disc_loss"])
+    # accel.scaler.unscale_(state.optimizer_d)
+    # output["other/grad_norm_d"] = torch.nn.utils.clip_grad_norm_(
+    #     state.discriminator.parameters(), 10.0
+    # )
+    # accel.step(state.optimizer_d)
+    # state.scheduler_d.step()
 
     with accel.autocast():
-        output["adv/disc_loss"] = state.gan_loss.discriminator_loss(recons, signal)
-
-    state.optimizer_d.zero_grad()
-    accel.backward(output["adv/disc_loss"])
-    accel.scaler.unscale_(state.optimizer_d)
-    output["other/grad_norm_d"] = torch.nn.utils.clip_grad_norm_(
-        state.discriminator.parameters(), 10.0
-    )
-    accel.step(state.optimizer_d)
-    state.scheduler_d.step()
-
-    with accel.autocast():
-        output["stft/loss"] = state.stft_loss(recons, signal)
-        output["mel/loss"] = state.mel_loss(recons, signal)
-        output["waveform/loss"] = state.waveform_loss(recons, signal)
-        (
-            output["adv/gen_loss"],
-            output["adv/feat_loss"],
-        ) = state.gan_loss.generator_loss(recons, signal)
+        output["stft/loss"] = state.stft_loss(recons, batch["signal"])
+        # output["stft/loss_original"] = state.stft_loss(original_recons, original_signal)
+        output["mel/loss"] = state.mel_loss(recons, batch["signal"])
+        # output["mel/loss_original"] = state.mel_loss(original_recons, original_signal)
+        output["waveform/loss"] = state.waveform_loss(recons, batch["signal"])
+        # output["waveform/loss_original"] = state.waveform_loss(original_recons, original_signal)
+        # (
+        #     output["adv/gen_loss"],
+        #     output["adv/feat_loss"],
+        # ) = state.gan_loss.generator_loss(recons, batch["signal"])
+        # (
+        #     output["adv/gen_loss_original"],
+        #     output["adv/feat_loss_original"],
+        # ) = state.gan_loss.generator_loss(original_recons, original_signal)
         output["vq/commitment_loss"] = commitment_loss
-        output["vq/codebook_loss"] = codebook_loss
+        # output["vq/codebook_loss"] = codebook_loss
+        # output["vq/commitment_loss_original"] = original_commitment_loss
+        # output["vq/codebook_loss_original"] = original_codebook_loss
+        output["z_loss"] = z_loss
         output["loss"] = sum([v * output[k] for k, v in lambdas.items() if k in output])
 
     state.optimizer_g.zero_grad()
@@ -328,7 +359,7 @@ def save_samples(state, val_idx, writer):
 
     audio_dict = {"recons": recons}
     if state.tracker.step == 0:
-        audio_dict["signal"] = signal
+        audio_dict["signal"] = batch["signal"]
 
     for k, v in audio_dict.items():
         for nb in range(v.batch_size):
@@ -354,7 +385,7 @@ def train(
     seed: int = 0,
     save_path: str = "ckpt",
     num_iters: int = 250000,
-    save_iters: list = [10000, 50000, 100000, 200000],
+    save_iters: list = [10000, 50000, 100000, 200000, 250000, 300000, 350000, 400000, 450000, 500000],
     sample_freq: int = 10000,
     valid_freq: int = 1000,
     batch_size: int = 12,
@@ -378,7 +409,7 @@ def train(
         writer=writer, log_file=f"{save_path}/log.txt", rank=accel.local_rank
     )
 
-    state = load(args, accel, tracker, save_path)
+    state = load(args, accel, tracker, save_path, resume=False)
     train_dataloader = accel.prepare_dataloader(
         state.train_data,
         start_idx=state.tracker.step * batch_size,

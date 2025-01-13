@@ -160,6 +160,7 @@ class ResidualVectorQuantize(nn.Module):
 
         codebook_indices = []
         latents = []
+        residuals = [residual]
 
         if n_quantizers is None:
             n_quantizers = self.n_codebooks
@@ -184,6 +185,7 @@ class ResidualVectorQuantize(nn.Module):
             )
             z_q = z_q + z_q_i * mask[:, None, None]
             residual = residual - z_q_i
+            
 
             # Sum losses
             commitment_loss += (commitment_loss_i * mask).mean()
@@ -191,11 +193,11 @@ class ResidualVectorQuantize(nn.Module):
 
             codebook_indices.append(indices_i)
             latents.append(z_e_i)
-
+            residuals.append(residual)
         codes = torch.stack(codebook_indices, dim=1)
         latents = torch.cat(latents, dim=1)
 
-        return z_q, codes, latents, commitment_loss, codebook_loss
+        return z_q, codes, latents, commitment_loss, codebook_loss, residuals
 
     def from_codes(self, codes: torch.Tensor):
         """Given the quantized codes, reconstruct the continuous representation

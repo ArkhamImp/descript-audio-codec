@@ -1,3 +1,11 @@
 $include:
   - conf/base.yml
   - conf/1gpu.yml
+
+train/build_dataset.folders:
+  vctk:
+    - vctk_train.csv
+
+val/build_dataset.folders:
+  vctk:
+    - vctk_val.csv
